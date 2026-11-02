@@ -1,0 +1,18 @@
+﻿# Runtime & logs
+.accio-bridge.pid
+*.log
+bridge.log
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Node dependencies
+node_modules/
+npm-debug.log*
+
+# Test coverage & build artifacts
+coverage/
+.nyc_output/

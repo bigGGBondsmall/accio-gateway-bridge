@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Accio Bridge</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" id="brandMark" aria-hidden="true"></span>
+      <span class="brand-name">Accio Bridge</span>
+    </div>
+    <nav class="nav" id="nav" aria-label="主导航"></nav>
+    <div class="sidebar-foot">
+      <button type="button" class="gateway-chip" id="gatewayChip">
+        <span class="dot" id="gatewayDot"></span>
+        <span class="gateway-chip-text" id="gatewayChipText">正在读取状态…</span>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="main-header">
+      <h1 class="view-title" id="viewTitle">概览</h1>
+      <div class="header-actions" id="headerActions"></div>
+    </header>
+    <div class="view" id="viewRoot" tabindex="-1"></div>
+  </main>
+</div>
+
+<div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="false"></div>
+<div class="layer" id="layer"></div>
+
+<script defer src="app.js"></script>
+<script defer src="icons.js"></script>
+<script defer src="api.js"></script>
+<script defer src="mock.js"></script>
+<script defer src="ui.js"></script>
+<script defer src="views/overview.js"></script>
+<script defer src="views/providers.js"></script>
+<script defer src="views/models.js"></script>
+<script defer src="views/gateway.js"></script>
+<script defer src="views/logs.js"></script>
+<script defer src="views/test.js"></script>
+<script defer src="views/settings.js"></script>
+</body>
+</html>

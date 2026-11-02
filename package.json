@@ -1,0 +1,36 @@
+{
+  "name": "accio-gateway-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local gateway bridge for Accio Work Desktop: routes LLM traffic to custom models (Ollama / OpenAI-compatible) and transparently proxies everything else to the upstream Alibaba gateway.",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "bin": {
+    "accio": "bin/cli.js",
+    "accio-bridge": "bin/cli.js"
+  },
+  "scripts": {
+    "cli": "node bin/cli.js",
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js && node --check src/discovery.js && node --check src/converter.js && node --check src/proxy.js && node --check bin/cli.js && node --check src/cli/terminal.js && node --check src/cli/daemon.js && node --check src/cli/tester.js && node --check tests/test-providers.js",
+    "smoke": "node test/smoke.js",
+    "test": "node tests/test-integration.js",
+    "test:cli": "node tests/test-cli.js",
+    "test:providers": "node tests/test-providers.js"
+  },
+  "keywords": [
+    "accio",
+    "gateway",
+    "bridge",
+    "ollama",
+    "openai",
+    "sse",
+    "proxy"
+  ],
+  "license": "MIT",
+  "dependencies": {}
+}

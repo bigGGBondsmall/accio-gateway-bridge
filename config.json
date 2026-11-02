@@ -1,0 +1,99 @@
+{
+  "_readme": "Accio Gateway Bridge Configuration. Point Accio Desktop to http://127.0.0.1:8080 by running launch-accio.bat or start-all.bat",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "maxBodyBytes": 26214400,
+    "cors": true,
+    "token": "",
+    "enforceToken": false,
+    "logLevel": "info"
+  },
+  "upstream": {
+    "baseUrl": "https://phoenix-gw.alibaba.com",
+    "timeoutMs": 300000,
+    "apiKey": ""
+  },
+  "catalog": {
+    "enabled": true,
+    "providerName": "custom",
+    "providerDisplayName": "Custom AI (Local / OpenAI)",
+    "fetchOfficial": true,
+    "timeoutMs": 8000,
+    "cacheTtlMs": 300000
+  },
+  "models": [
+    {
+      "id": "deepseek-local",
+      "modelCode": "deepseek-local",
+      "displayName": "DeepSeek R1 / V3 (Ollama 本地)",
+      "provider": "ollama",
+      "baseUrl": "http://127.0.0.1:11434",
+      "upstreamModel": "deepseek-r1:14b",
+      "apiKey": "",
+      "contextWindow": 128000,
+      "multimodal": false,
+      "stream": true,
+      "enabled": false,
+      "visible": true,
+      "isDefault": true,
+      "freeUse": true,
+      "locked": false,
+      "usageLevel": 0
+    },
+    {
+      "id": "openai-compatible",
+      "modelCode": "openai-compatible",
+      "displayName": "Custom OpenAI / OneAPI / vLLM",
+      "provider": "openai",
+      "baseUrl": "https://api.openai.com/v1",
+      "upstreamModel": "gpt-4o",
+      "apiKey": "sk-your-key-here",
+      "contextWindow": 128000,
+      "multimodal": true,
+      "stream": true,
+      "enabled": false,
+      "visible": true,
+      "isDefault": false,
+      "freeUse": true,
+      "locked": false,
+      "usageLevel": 0
+    },
+    {
+      "id": "mercury-3",
+      "modelCode": "mercury-3",
+      "displayName": "mercury-3",
+      "provider": "openai",
+      "baseUrl": "http://127.0.0.1:8788/inception/v1",
+      "upstreamModel": "mercury-3",
+      "apiKey": "sk-your-key-here",
+      "contextWindow": 628000,
+      "multimodal": false,
+      "stream": true,
+      "enabled": true,
+      "visible": true,
+      "isDefault": true,
+      "freeUse": true,
+      "locked": false,
+      "usageLevel": 0
+    },
+    {
+      "id": "auto/deepseek-v4.1-flash",
+      "modelCode": "auto/deepseek-v4.1-flash",
+      "displayName": "auto/deepseek-v4.1-flash",
+      "provider": "openai",
+      "baseUrl": "http://127.0.0.1:3425",
+      "upstreamModel": "auto/deepseek-v4.1-flash",
+      "apiKey": "",
+      "contextWindow": 1028000,
+      "multimodal": false,
+      "stream": true,
+      "enabled": true,
+      "visible": true,
+      "isDefault": false,
+      "freeUse": true,
+      "locked": false,
+      "usageLevel": 0
+    }
+  ]
+}
