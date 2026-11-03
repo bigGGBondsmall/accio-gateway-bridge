@@ -398,6 +398,102 @@ If you installed Accio in a custom folder, either:
 - Features like login, profile, skills, and official models depend on `https://phoenix-gw.alibaba.com`.
 - If the official gateway is blocked in your network, configure an upstream mirror in `config.json` under `upstream.baseUrl`.
 
+### 6. Reasoning / Thinking Models Stall Instead of Calling Tools
+
+When a routed model emits `reasoning_content` (DeepSeek-R1 style, Magpie, some
+OpenRouter endpoints), the bridge sends that trace as an Accio **thought part**
+(`{ text, thought: true }`) instead of message text.
+
+Why it matters: Accio replays the model's own trace back on every following turn
+as a `thought: true` part. If the trace were sent as ordinary text it would enter
+the visible transcript *and* the assistant history, so the model reads its own
+narration ("I need to actually make the tool call…") as previous output, echoes
+it, and stalls with `同一工具错误连续发生，任务无法继续` or a text-only reply.
+Accio routes `thought: true` parts into its thinking UI and never treats them as
+assistant output; the bridge likewise drops them when building the upstream
+OpenAI `messages`, so a trace can never round-trip into `content`.
+
+If you still see narration in the chat body, the running bridge predates this
+behaviour — restart it (`node src/server.js`) so the new `src/server.js` /
+`src/converter.js` are loaded.
+
+### 7. Empty Replies, "IP 检测异常" or Gateway HTML Pages
+
+The official gateway (and the CDNs in front of it) answer some failures with a
+`200 text/html` page instead of an SSE stream — the region-block page
+(`IP 检测异常`) is the common case. That body is not a model response, so the
+bridge now converts it into an SSE `error` frame naming the failure, and
+decompresses it first (the gateway gzips it) so the message is readable.
+
+This applies to both paths: custom models (`src/server.js`) and official models
+proxied verbatim (`src/proxy.js`, `guardHtmlErrors`).
+
+If you see `upstream gateway returned an HTML page instead of a model stream`,
+the request never reached a model — check network region / upstream reachability
+rather than the model configuration.
+
+### 8. Tools Never Called / Blank Turns After a Tool Result
+
+Several protocol details are easy to get wrong and were fixed here:
+
+- Tool-call frames always carry `id`, `name`, `args` **and** `argsJson`. Accio
+  parses `argsJson`; without it the tool receives `{}` and fails with
+  `Error: action is required.`
+- Arguments streamed across many chunks are accumulated into one complete frame
+  (Accio only requests incremental delivery for gemini-style models).
+- Providers that restart the tool-call `index` at `0` for each call no longer
+  overwrite earlier calls.
+- Malformed tool arguments are passed through verbatim, so Accio sets its own
+  `argumentsParseError` flag instead of receiving a bogus `{ __raw: ... }` object.
+
+### 9. Attachments and Generation Knobs
+
+`inlineData` images are forwarded as OpenAI `image_url` data URLs and `fileData`
+as a text reference; turns that carry nothing are dropped instead of being sent
+as empty messages. Set `multimodal: true` on the model so Accio offers
+attachments at all.
+
+Accio also sends `reasoningEffort` (also inside `properties.reasoning_effort`),
+`responseFormat`, `toolChoice`, `topK`, `thinkingBudget` and `includeThoughts`.
+The first four are forwarded upstream (`reasoning_effort`, `response_format`,
+`tool_choice`, `top_k`); `thinkingBudget: 0` or `includeThoughts: false` turns
+off the thinking trace, matching Accio's own thinking switch.
+
+### 10. Endless Identical Tool Calls (the agent re-reads the same thing forever)
+
+The agent can loop on a *successful* tool call: it keeps re-reading the same skill
+or re-running the same query, every call succeeding, until you stop it. Accio's own
+circuit breaker only trips on repeated **errors**, so a loop of successful calls
+never breaks by itself.
+
+The usual cause is that the tool the model actually needs is not in the tool list
+it received, so it falls back to whatever call it can make. Reproduced and
+diagnosed here by replaying the stored conversation: with the `workflow` tool
+present the model immediately ran `workflow(1688-cowboy)` and finished, and with
+`workflow` withheld the same history re-read skills indefinitely.
+
+Two bridge-side causes were fixed:
+
+- A declaration whose schema arrives as a JSON **string** (`parametersJsonSchema`)
+  or under another key used to be replaced by a no-argument schema, which makes the
+  tool uncallable. All shapes are now recognised, and the fallback is permissive
+  (`additionalProperties: true`).
+- A tool name that arrives twice (placeholder first, real declaration later) used
+  to keep the placeholder. The richer declaration now wins.
+
+The bridge logs the tool set it forwards, once per distinct set:
+
+```
+tools forwarded for auto/deepseek-v4.1-flash: 37 [skill, plugin, ..., workflow]
+tools sent with a permissive schema: tool_search
+tool declarations dropped (unrecognised shape): someGroup
+```
+
+If a needed tool is missing from that list, the bridge never received it — the
+withholding is on the client side (Accio's deferred-tool mechanism). If it is
+listed with a permissive schema, the schema did not survive and you should report
+the declaration shape.
+
 ---
 
 ## License

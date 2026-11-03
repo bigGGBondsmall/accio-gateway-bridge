@@ -14,6 +14,7 @@
 
 const http = require('node:http');
 const https = require('node:https');
+const zlib = require('node:zlib');
 
 /** Hop-by-hop headers that must not be forwarded verbatim. */
 const HOP_BY_HOP = new Set([
@@ -50,6 +51,69 @@ function sanitizeResponseHeaders(headers) {
     out[key] = value;
   }
   return out;
+}
+
+/**
+ * Build an Accio-shaped SSE error frame.
+ *
+ * The transport reads `error` out of a `data:` frame, so a failure can be reported
+ * on an HTTP 200 stream instead of a raw body the client cannot parse.
+ */
+function sseErrorFrame(message, code) {
+  return `data: ${JSON.stringify({
+    error: { code: code || 502, message, status: 'UNAVAILABLE' },
+    turnComplete: true,
+    finishReason: 'STOP',
+  })}\n\n`;
+}
+
+/** Collapse an HTML error page into a single readable line. */
+function htmlToMessage(html, fallback) {
+  const source = String(html || '');
+  const text = source
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+  if (text) return text;
+
+  // Gateway error pages are often script-driven with no body text; the title or the
+  // link target still names the failure (for example the punish/ICBUSpace page).
+  const title = source.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (title && title[1].replace(/\s+/g, ' ').trim()) {
+    return title[1].replace(/\s+/g, ' ').trim().slice(0, 200);
+  }
+  const link = source.match(/href="([^"]{1,200})"/i);
+  if (link && link[1].trim()) return `see ${link[1].trim()}`;
+  return fallback;
+}
+
+/**
+ * Decompress a buffered upstream body.
+ *
+ * Node's http client does not decode `content-encoding`, and the gateway gzips its
+ * error pages, so the bytes have to be decoded before any text can be read.
+ * Returns undefined when the body cannot be decoded.
+ */
+function decodeBody(buffer, encoding) {
+  const enc = String(encoding || '').toLowerCase();
+  try {
+    if (enc.includes('gzip')) return zlib.gunzipSync(buffer);
+    if (enc.includes('br')) return zlib.brotliDecompressSync(buffer);
+    if (enc.includes('deflate')) {
+      try {
+        return zlib.inflateSync(buffer);
+      } catch {
+        return zlib.inflateRawSync(buffer);
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return buffer;
 }
 
 /**
@@ -112,6 +176,46 @@ function createProxyHandler(options) {
           servername: upstream.hostname,
         },
         (upstreamRes) => {
+          // Generation routes: a gateway/CDN error page answers 200 with HTML, which
+          // the client would parse as a broken SSE stream and show as a blank reply.
+          const upstreamType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
+          if (options.guardHtmlErrors && upstreamRes.statusCode === 200 && upstreamType.includes('text/html')) {
+            const chunks = [];
+            let size = 0;
+            upstreamRes.on('data', (c) => {
+              if (size < 65536) {
+                chunks.push(c);
+                size += c.length;
+              }
+            });
+            upstreamRes.on('end', () => {
+              const raw = Buffer.concat(chunks);
+              const decoded = decodeBody(raw, upstreamRes.headers['content-encoding']);
+              const message = htmlToMessage(
+                decoded === undefined ? '' : decoded.toString('utf8'),
+                'upstream gateway returned an HTML page instead of a model stream',
+              );
+              const body = sseErrorFrame(`upstream gateway error from ${requestPath}: ${message}`);
+              if (!res.headersSent) {
+                res.writeHead(200, {
+                  'content-type': 'text/event-stream; charset=utf-8',
+                  'cache-control': 'no-cache, no-transform',
+                  connection: 'keep-alive',
+                  'x-accel-buffering': 'no',
+                  'content-length': String(Buffer.byteLength(body)),
+                });
+              }
+              res.end(body);
+              log('warn', `upstream HTML error page on ${requestPath}: ${message.slice(0, 120)}`);
+              settle();
+            });
+            upstreamRes.on('error', (err) => {
+              res.destroy(err);
+              settle();
+            });
+            return;
+          }
+
           res.writeHead(upstreamRes.statusCode || 502, sanitizeResponseHeaders(upstreamRes.headers));
           upstreamRes.pipe(res);
           upstreamRes.on('end', settle);

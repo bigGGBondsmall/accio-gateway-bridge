@@ -123,6 +123,128 @@ function createMockOpenAIServer(options = {}) {
       // Check if tool calling should be triggered
       const isToolCall = promptText.includes('CALL_TOOL') || (Array.isArray(body.tools) && body.tools.length > 0 && promptText.toLowerCase().includes('tool'));
 
+      // Reasoning-model simulation: streams a `reasoning_content` trace before the
+      // answer. Used to prove the bridge forwards traces as Accio `thought` parts
+      // and never as visible message text (regression: reasoning leaked into the
+      // assistant history and the model echoed it instead of calling tools).
+      if (promptText.includes('REASONING')) {
+        const traceChunks = ['The user wants ', 'a 7-day summary. ', 'I need to call the tool.'];
+        if (isStreaming) {
+          const frames = traceChunks.map((text) => ({
+            id: 'chatcmpl-mock-reasoning',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: body.model || 'mock-custom-model',
+            choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: text } }],
+          }));
+          frames.push({
+            id: 'chatcmpl-mock-reasoning',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: body.model || 'mock-custom-model',
+            choices: [{ index: 0, delta: { content: 'Answer.' } }],
+          });
+          frames.push({
+            id: 'chatcmpl-mock-reasoning',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: body.model || 'mock-custom-model',
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 10, completion_tokens: 12, total_tokens: 22 },
+          });
+          sendSseFrames(res, [...frames, '[DONE]']);
+          return;
+        }
+        sendJson(res, 200, {
+          id: 'chatcmpl-mock-reasoning',
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: body.model || 'mock-custom-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'Answer.', reasoning_content: 'Internal trace.' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 12, total_tokens: 22 },
+        });
+        return;
+      }
+
+      // Non-SSE upstream: a CDN/gateway error page answering 200 (what a region
+      // block looks like). The bridge must surface a real error, not an empty turn.
+      if (promptText.includes('HTML_PAGE')) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end('<html><body><a href="https://bixi-intl.alicdn.com/punish/punish:resource:template:ICBUSpace">IP 检测异常</a></body></html>');
+        return;
+      }
+
+      // Provider ignores `stream: true` and answers with a plain completion JSON.
+      if (promptText.includes('JSON_ONLY')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          id: 'chatcmpl-mock-json',
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: body.model || 'mock-custom-model',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'non-stream fallback reply' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 5, completion_tokens: 6, total_tokens: 11 },
+        }));
+        return;
+      }
+
+      // Provider restarts the tool-call index at 0 for each call.
+      if (promptText.includes('DUP_INDEX')) {
+        sendSseFrames(res, [
+          {
+            id: 'chatcmpl-mock-dup',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: body.model || 'mock-custom-model',
+            choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_dup_a', type: 'function', function: { name: 'first_tool', arguments: '{}' } }] } }],
+          },
+          {
+            id: 'chatcmpl-mock-dup',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: body.model || 'mock-custom-model',
+            choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_dup_b', type: 'function', function: { name: 'second_tool', arguments: '{}' } }] } }],
+          },
+          {
+            id: 'chatcmpl-mock-dup',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: body.model || 'mock-custom-model',
+            choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+          },
+          '[DONE]',
+        ]);
+        return;
+      }
+
+      // Provider emits syntactically invalid tool arguments.
+      if (promptText.includes('BROKEN_ARGS')) {
+        sendSseFrames(res, [
+          {
+            id: 'chatcmpl-mock-broken',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: body.model || 'mock-custom-model',
+            choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_broken_args', type: 'function', function: { name: 'bad_tool', arguments: '{"path": ' } }] } }],
+          },
+          {
+            id: 'chatcmpl-mock-broken',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: body.model || 'mock-custom-model',
+            choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+          },
+          '[DONE]',
+        ]);
+        return;
+      }
+
       if (isToolCall) {
         if (isStreaming) {
           sendSseFrames(res, [

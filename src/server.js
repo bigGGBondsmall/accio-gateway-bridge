@@ -554,6 +554,27 @@ function authorize(req, config) {
   return candidates.includes(config.server.token);
 }
 
+/**
+ * Opt-in capture of incoming generation requests.
+ *
+ * Setting `ACCIO_BRIDGE_CAPTURE_DIR` records each `/api/adk/llm/generateContent` body
+ * there. It is off unless the variable is set, because the bodies contain the whole
+ * conversation — point it at a scratch directory and delete it when done.
+ */
+function captureGenerateRequest(body) {
+  const dir = process.env.ACCIO_BRIDGE_CAPTURE_DIR;
+  if (!dir) return;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const file = path.join(dir, `generate-${stamp}.json`);
+    fs.writeFileSync(file, JSON.stringify(body), 'utf8');
+    log.info(`captured generation request -> ${file}`);
+  } catch (err) {
+    log.warn(`could not capture generation request: ${err.message}`);
+  }
+}
+
 async function handleGenerate(req, res, config, proxy, rawBody) {
   let body;
   try {
@@ -562,6 +583,7 @@ async function handleGenerate(req, res, config, proxy, rawBody) {
     sendError(res, 400, `invalid JSON body: ${err.message}`);
     return;
   }
+  captureGenerateRequest(body);
 
   const requested = typeof body.model === 'string' ? body.model.trim().toLowerCase() : '';
   const model = requested ? config.modelIndex.get(requested) : undefined;
@@ -613,29 +635,57 @@ function startSseIfNeeded(res) {
 function createSink(res) {
   const sink = {
     toolCalls: new Map(),
+    indexKeys: new Map(),
+    callSeq: 0,
     usage: undefined,
     finishReason: undefined,
+    emittedParts: false,
     finished: false,
   };
 
   sink.text = (chunk) => {
     if (sink.finished || !chunk) return;
+    sink.emittedParts = true;
     startSseIfNeeded(res);
     writeFrame(res, converter.textFrame(chunk));
   };
 
+  // Reasoning traces ride on `thought` parts so Accio shows them as thinking and
+  // keeps them out of the visible transcript. Emitting them as normal text made
+  // them part of the assistant history, which stalled tool calling.
+  sink.thought = (chunk) => {
+    if (sink.finished || !chunk) return;
+    sink.emittedParts = true;
+    startSseIfNeeded(res);
+    writeFrame(res, converter.textFrame(chunk, { thought: true }));
+  };
+
+  // Upstream providers reuse `index` while streaming one call's arguments, but some
+  // restart it at 0 for every call. Keying only on `index` silently dropped each
+  // earlier call, so an index is remapped as soon as a different `id` appears.
   sink.toolDelta = (index, name, argsText, id) => {
-    const key = index ?? sink.toolCalls.size;
-    const entry = sink.toolCalls.get(key) || { name: '', args: '', id };
+    const slot = index ?? 'tail';
+    let key = sink.indexKeys.get(slot);
+    let entry = key === undefined ? undefined : sink.toolCalls.get(key);
+
+    if (entry && id && entry.id && entry.id !== id) {
+      key = undefined;
+      entry = undefined;
+    }
+    if (!entry) {
+      key = `k${sink.callSeq++}`;
+      sink.indexKeys.set(slot, key);
+      entry = { name: '', args: '', id: undefined };
+      sink.toolCalls.set(key, entry);
+    }
     if (name && !entry.name) entry.name = name;
     if (argsText) entry.args += argsText;
     if (id && !entry.id) entry.id = id;
-    sink.toolCalls.set(key, entry);
   };
 
   sink.addToolCall = (name, args) => {
     if (!name) return;
-    sink.toolCalls.set(sink.toolCalls.size, {
+    sink.toolCalls.set(`k${sink.callSeq++}`, {
       name,
       args: converter.isObject(args) ? args : converter.parseToolArguments(args),
     });
@@ -659,11 +709,20 @@ function createSink(res) {
       .map((call) => ({
         id: call.id,
         name: call.name,
-        args: typeof call.args === 'string' ? converter.parseToolArguments(call.args) : call.args,
+        // Keep the raw argument text: toolCallsFrame decides whether it parses.
+        args: call.args,
       }));
 
-    if (calls.length > 0) writeFrame(res, converter.toolCallsFrame(calls));
-    else writeFrame(res, converter.doneFrame(sink.usage, sink.finishReason));
+    if (calls.length > 0) {
+      writeFrame(res, converter.toolCallsFrame(calls));
+    } else {
+      // A stream that carried nothing at all would render as a blank assistant
+      // bubble in Accio, so say so instead of failing silently.
+      if (!sink.emittedParts && !sink.usage && !sink.finishReason) {
+        writeFrame(res, converter.textFrame('[bridge] upstream returned an empty response stream'));
+      }
+      writeFrame(res, converter.doneFrame(sink.usage, sink.finishReason));
+    }
 
     if (!res.writableEnded) res.end();
   };
@@ -683,8 +742,102 @@ function createSink(res) {
   return sink;
 }
 
+/**
+ * Build an Accio frame from an upstream body that is not an SSE stream.
+ *
+ * Returns a normal GenAI frame when the body is a chat completion, otherwise an
+ * `{ error }` frame describing what actually came back (CDN/gateway error pages
+ * answer 200 with HTML, which is what a region block looks like).
+ */
+function nonSseUpstreamFrame(text, contentType, url) {
+  const body = String(text || '');
+  let json;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    json = undefined;
+  }
+
+  if (converter.isObject(json)) {
+    if (converter.isObject(json.error)) {
+      const message = typeof json.error.message === 'string' ? json.error.message : JSON.stringify(json.error);
+      return { error: { message: `upstream error from ${url}: ${message.slice(0, 300)}` } };
+    }
+    if (Array.isArray(json.choices) && json.choices.length > 0) {
+      return converter.openAIResponseToGenAI(json);
+    }
+  }
+
+  const snippet = body
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+
+  return {
+    error: {
+      message: `upstream returned ${contentType || 'a non-SSE body'} instead of text/event-stream from ${url}${snippet ? `: ${snippet}` : ''}`,
+    },
+  };
+}
+
+/**
+ * Whether the client wants the reasoning trace surfaced.
+ *
+ * Accio sends `includeThoughts: false` (and `thinkingBudget: 0`) when the user turns
+ * thinking off, and used to still receive the trace because the bridge forwarded it
+ * unconditionally.
+ */
+function thoughtsRequested(body) {
+  const options = converter.readGenerationOptions(body);
+  if (options.includeThoughts === false) return false;
+  if (options.thinkingBudget === 0) return false;
+  return true;
+}
+
+let lastToolSignature;
+
+/**
+ * Log the tool set forwarded upstream, once per distinct set.
+ *
+ * When a model cannot see a tool it needs it re-issues whatever call it can, which
+ * shows up as an endless identical tool-call loop. Recording the forwarded names
+ * makes that verifiable instead of guessed, and flags declarations that had to be
+ * sent with a permissive schema (which used to make them uncallable).
+ */
+function logForwardedTools(tools, modelId) {
+  if (!Array.isArray(tools) || tools.length === 0) {
+    if (lastToolSignature !== 'none') {
+      lastToolSignature = 'none';
+      log.warn(`tools forwarded for ${modelId}: none`);
+    }
+    return;
+  }
+
+  const names = tools.map((tool) => tool.function && tool.function.name).filter(Boolean);
+  const signature = names.join(',');
+  if (signature === lastToolSignature) return;
+  lastToolSignature = signature;
+
+  log.info(`tools forwarded for ${modelId}: ${names.length} [${names.join(', ')}]`);
+  const diag = tools.diagnostics;
+  if (diag && diag.dropped.length > 0) {
+    log.warn(`tool declarations dropped (unrecognised shape): ${diag.dropped.join('; ')}`);
+  }
+  if (diag && diag.schemaFallbacks.length > 0) {
+    log.warn(`tools sent with a permissive schema: ${diag.schemaFallbacks.join(', ')}`);
+  }
+  if (diag && diag.upgraded.length > 0) {
+    log.info(`tool schemas upgraded from a placeholder declaration: ${diag.upgraded.join(', ')}`);
+  }
+}
+
 async function streamOpenAI(res, model, body) {
   const payload = converter.toOpenAIRequest(model, body);
+  const thoughtsEnabled = thoughtsRequested(body);
+  logForwardedTools(payload.tools, model.id);
   const url = converter.resolveEndpoint(model.baseUrl || 'https://api.openai.com/v1', '/chat/completions');
   const sink = createSink(res);
   const controller = new AbortController();
@@ -718,9 +871,34 @@ async function streamOpenAI(res, model, body) {
   }
 
   if (!payload.stream) {
-    const json = await response.json();
-    writeFrame(res, converter.openAIResponseToGenAI(json));
-    res.end();
+    const text = await response.text();
+    const frame = nonSseUpstreamFrame(text, response.headers.get('content-type'), url);
+    if (frame.error) {
+      sink.fail(new Error(frame.error.message));
+      return 'error';
+    }
+    startSseIfNeeded(res);
+    sink.emittedParts = true;
+    writeFrame(res, frame);
+    if (!res.writableEnded) res.end();
+    return 'ok';
+  }
+
+  // Some providers (and gateway/CDN error pages) answer 200 with HTML or plain JSON
+  // instead of SSE. Feeding that to the SSE reader yields zero frames, which Accio
+  // renders as a blank assistant message, so surface a real error instead.
+  const upstreamType = String(response.headers.get('content-type') || '').toLowerCase();
+  if (!upstreamType.includes('text/event-stream')) {
+    const text = await response.text().catch(() => '');
+    const frame = nonSseUpstreamFrame(text, upstreamType, url);
+    if (frame.error) {
+      sink.fail(new Error(frame.error.message));
+      return 'error';
+    }
+    startSseIfNeeded(res);
+    sink.emittedParts = true;
+    writeFrame(res, frame);
+    if (!res.writableEnded) res.end();
     return 'ok';
   }
 
@@ -736,10 +914,13 @@ async function streamOpenAI(res, model, body) {
     if (!choice) return;
     const delta = choice.delta || {};
     if (typeof delta.content === 'string' && delta.content) sink.text(delta.content);
-    if (delta.reasoning_content && typeof delta.reasoning_content === 'string' && !delta.content) {
-      // Reasoning models: surface the trace as text so the UI shows progress.
-      sink.text(delta.reasoning_content);
-    }
+    const reasoning = typeof delta.reasoning_content === 'string' && delta.reasoning_content
+      ? delta.reasoning_content
+      : (typeof delta.reasoning === 'string' ? delta.reasoning : '');
+    // Send the trace as a reasoning part (Accio's "thinking"), never as message
+    // text: text ends up in the assistant history and the model then echoes its
+    // own narration instead of emitting tool calls.
+    if (reasoning && !delta.content && thoughtsEnabled) sink.thought(reasoning);
     if (Array.isArray(delta.tool_calls)) {
       for (const call of delta.tool_calls) {
         sink.toolDelta(call.index, call.function?.name, call.function?.arguments, call.id);
@@ -762,6 +943,7 @@ async function streamOpenAI(res, model, body) {
 
 async function streamOllama(res, model, body) {
   const payload = converter.toOllamaRequest(model, body);
+  const thoughtsEnabled = thoughtsRequested(body);
   const url = converter.resolveEndpoint(model.baseUrl || 'http://127.0.0.1:11434', '/api/chat');
   const sink = createSink(res);
   const controller = new AbortController();
@@ -798,6 +980,7 @@ async function streamOllama(res, model, body) {
     const json = await response.json();
     const message = json?.message || {};
     const parts = [];
+    if (typeof message.thinking === 'string' && message.thinking) parts.push({ text: message.thinking, thought: true });
     if (typeof message.content === 'string' && message.content) parts.push({ text: message.content });
     sink.noteUsage({
       prompt_tokens: json.prompt_eval_count,
@@ -824,7 +1007,7 @@ async function streamOllama(res, model, body) {
         sink.addToolCall(call.function?.name, call.function?.arguments);
       }
     }
-    if (typeof chunk.thinking === 'string' && chunk.thinking && !message.content) sink.text(chunk.thinking);
+    if (typeof chunk.thinking === 'string' && chunk.thinking && !message.content && thoughtsEnabled) sink.thought(chunk.thinking);
     if (chunk.done) {
       sink.noteUsage({ prompt_tokens: chunk.prompt_eval_count, completion_tokens: chunk.eval_count });
       sink.noteFinish(chunk.done_reason === 'length' ? 'length' : 'stop');
@@ -1016,6 +1199,15 @@ function createServer(config) {
     upstreamBaseUrl: config.upstream.baseUrl,
     timeoutMs: config.upstream.timeoutMs,
     apiKey: config.upstream.apiKey,
+    log: (...args) => log.debug(...args),
+  });
+  // Generation requests additionally guard against gateway/CDN error pages that
+  // answer 200 with HTML; everything else stays a byte-for-byte transparent proxy.
+  const generateProxy = createProxyHandler({
+    upstreamBaseUrl: config.upstream.baseUrl,
+    timeoutMs: config.upstream.timeoutMs,
+    apiKey: config.upstream.apiKey,
+    guardHtmlErrors: true,
     log: (...args) => log.debug(...args),
   });
   let lastAccioDetect = null;
@@ -1308,7 +1500,7 @@ function createServer(config) {
           generationConfig: { temperature: Number(body.temperature) || 0.7 },
         };
         const genAiRaw = Buffer.from(JSON.stringify(genAiBody), 'utf8');
-        await handleGenerate(req, res, config, proxy, genAiRaw);
+        await handleGenerate(req, res, config, generateProxy, genAiRaw);
         return;
       }
 
@@ -1661,7 +1853,7 @@ function createServer(config) {
           return;
         }
         const raw = await readBody(req, config.server.maxBodyBytes);
-        await handleGenerate(req, res, config, proxy, raw);
+        await handleGenerate(req, res, config, generateProxy, raw);
         return;
       }
 
