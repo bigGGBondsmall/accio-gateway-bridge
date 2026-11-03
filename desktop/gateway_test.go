@@ -28,7 +28,7 @@ func TestExternalGatewayIsAdoptedAndStopRefused(t *testing.T) {
 	defer ts.Close()
 
 	root := t.TempDir()
-	gw := NewGatewayManager(root, "", false, mustPort(t, ts.URL))
+	gw := NewGatewayManager(root, "", false, mustPort(t, ts.URL), engineSpec{})
 	defer gw.Shutdown()
 
 	gw.Sync()
@@ -73,7 +73,7 @@ func TestSyncReportsBusyPortWithoutKillingIt(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	root := t.TempDir()
-	gw := NewGatewayManager(root, "", false, port)
+	gw := NewGatewayManager(root, "", false, port, engineSpec{})
 	gw.Sync()
 
 	st := gw.Status()
@@ -109,7 +109,7 @@ func TestStartFailsWithoutNode(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 
-	gw := NewGatewayManager(t.TempDir(), "", false, port)
+	gw := NewGatewayManager(t.TempDir(), "", false, port, engineSpec{})
 	err = gw.Start()
 	if err == nil {
 		t.Fatal("Start must fail when node could not be found")
@@ -137,7 +137,7 @@ func TestHealthTickDetectsExternalBridgeDisappearing(t *testing.T) {
 	}))
 	port := mustPort(t, ts.URL)
 
-	gw := NewGatewayManager(t.TempDir(), "", false, port)
+	gw := NewGatewayManager(t.TempDir(), "", false, port, engineSpec{})
 	defer gw.Shutdown()
 
 	gw.Sync()
@@ -176,7 +176,7 @@ func TestStartReportsNodeStderrOnEarlyExit(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 
-	gw := NewGatewayManager(root, nodePath, true, port)
+	gw := NewGatewayManager(root, nodePath, true, port, engineSpec{path: nodePath, args: []string{filepath.Join("src", "server.js")}, found: true})
 	defer gw.Shutdown()
 	if err := gw.Start(); err == nil {
 		t.Fatal("Start must fail when node exits immediately")
@@ -202,7 +202,7 @@ func TestSyncRemovesOnlyStalePidFile(t *testing.T) {
 	if err := os.WriteFile(pidFile, []byte("999999999"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gw := NewGatewayManager(root, "", false, 1)
+	gw := NewGatewayManager(root, "", false, 1, engineSpec{})
 	gw.Sync()
 	if _, err := os.Stat(pidFile); err == nil {
 		t.Fatal("stale pid file should be removed")
@@ -223,7 +223,7 @@ func TestHealthTickClearsPortErrorOnceFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	gw := NewGatewayManager(t.TempDir(), "", false, port)
+	gw := NewGatewayManager(t.TempDir(), "", false, port, engineSpec{})
 	gw.Sync()
 	if st := gw.Status(); st.State != stateError {
 		t.Fatalf("state = %q, want error while the port is busy", st.State)

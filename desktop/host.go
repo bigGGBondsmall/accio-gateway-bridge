@@ -273,6 +273,11 @@ func (h *HostServer) stateBody() map[string]any {
 			"path":  h.cfg.NodePath,
 			"found": h.cfg.NodeFound,
 		},
+		// The engine is what the tray's start/stop acts on: the Rust gateway or the Node bridge.
+		"engine": map[string]any{
+			"path": h.gw.EnginePath(),
+			"rust": h.gw.EngineIsRust(),
+		},
 		"logFile": h.cfg.LogFile,
 	}
 }

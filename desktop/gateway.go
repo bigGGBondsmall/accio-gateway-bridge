@@ -60,8 +60,10 @@ type managedProcess struct {
 	stopRequested bool
 }
 
-// GatewayManager supervises the Node bridge: it either adopts an already
-// running instance or spawns `node src/server.js` with a hidden window.
+// GatewayManager supervises the gateway engine: it either adopts an already running
+// instance or spawns the configured engine with a hidden window. The engine is the Rust
+// gateway when one is present in the root (or ACCIO_BRIDGE_ENGINE points at one), and the
+// Node bridge otherwise.
 type GatewayManager struct {
 	root      string
 	logFile   string
@@ -69,6 +71,7 @@ type GatewayManager struct {
 	nodePath  string
 	nodeFound bool
 	port      int
+	engine    engineSpec
 
 	// opMu serializes start/stop/restart/sync; mu guards the status fields.
 	opMu sync.Mutex
@@ -86,7 +89,7 @@ type GatewayManager struct {
 	healthOnce sync.Once
 }
 
-func NewGatewayManager(root, nodePath string, nodeFound bool, port int) *GatewayManager {
+func NewGatewayManager(root, nodePath string, nodeFound bool, port int, engine engineSpec) *GatewayManager {
 	return &GatewayManager{
 		root:       root,
 		logFile:    filepath.Join(root, "bridge.log"),
@@ -94,6 +97,7 @@ func NewGatewayManager(root, nodePath string, nodeFound bool, port int) *Gateway
 		nodePath:   nodePath,
 		nodeFound:  nodeFound,
 		port:       port,
+		engine:     engine,
 		state:      stateStopped,
 		healthStop: make(chan struct{}),
 	}
@@ -103,6 +107,10 @@ func (g *GatewayManager) Port() int        { return g.port }
 func (g *GatewayManager) LogFile() string  { return g.logFile }
 func (g *GatewayManager) NodePath() string { return g.nodePath }
 func (g *GatewayManager) NodeFound() bool  { return g.nodeFound }
+
+// EnginePath and EngineIsRust let the UI describe what would be launched.
+func (g *GatewayManager) EnginePath() string { return g.engine.path }
+func (g *GatewayManager) EngineIsRust() bool { return g.engine.rust }
 
 func (g *GatewayManager) BaseURL() string {
 	return fmt.Sprintf("http://127.0.0.1:%d", g.port)
@@ -212,14 +220,20 @@ func (g *GatewayManager) Start() error {
 		return err
 	}
 
-	if !g.nodeFound {
+	if !g.engine.found {
+		if g.engine.rust {
+			return g.setError(fmt.Sprintf("未找到 Rust 网关引擎（%s），请先构建或设置环境变量 ACCIO_BRIDGE_ENGINE", g.engine.path))
+		}
 		return g.setError("未找到 node 可执行文件，请安装 Node.js 或设置环境变量 ACCIO_NODE")
 	}
-	if !hasServerScript(g.root) {
-		return g.setError(fmt.Sprintf("项目根 %s 缺少 src/server.js，无法启动网关", g.root))
+	if !g.engine.rust && !hasServerScript(g.root) {
+		return g.setError(fmt.Sprintf("项目根 %s 缺少 src/server.js，无法启动 Node 网关", g.root))
 	}
 
 	if err := g.spawn(); err != nil {
+		if g.engine.rust {
+			return g.setError("启动 Rust 网关失败: " + err.Error())
+		}
 		return g.setError("启动 node 失败: " + err.Error())
 	}
 
@@ -277,9 +291,11 @@ func (t *tailBuffer) String() string {
 }
 
 func (g *GatewayManager) spawn() error {
-	script := filepath.Join("src", "server.js")
-	cmd := exec.Command(g.nodePath, script)
+	// The gateways take the same hidden-window treatment: whatever the engine is, it is a
+	// child of this process and dies with it.
+	cmd := exec.Command(g.engine.path, g.engine.args...)
 	cmd.Dir = g.root
+	// The Node daemon reads these; the Rust gateway ignores them but they are harmless.
 	cmd.Env = append(os.Environ(),
 		"ACCIO_BRIDGE_DAEMON=1",
 		"ACCIO_BRIDGE_LOG_FILE="+g.logFile,

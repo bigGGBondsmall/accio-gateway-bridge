@@ -20,7 +20,7 @@ const testToken = "0123456789abcdef0123456789abcdef"
 func testHost(t *testing.T, gwPort int) (base, token string) {
 	t.Helper()
 
-	gw := NewGatewayManager(t.TempDir(), "", false, gwPort)
+	gw := NewGatewayManager(t.TempDir(), "", false, gwPort, engineSpec{})
 	if gwPort > 0 {
 		gw.Sync()
 	}

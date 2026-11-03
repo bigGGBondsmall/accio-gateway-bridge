@@ -173,3 +173,108 @@ func TestNewTokenIsRandomHex(t *testing.T) {
 		t.Fatal("two generated tokens should differ")
 	}
 }
+
+// writeRustGateway lays out the Rust source package shape: config.json plus a built engine
+// under target/release, and returns the engine path.
+func writeRustGateway(t *testing.T, root string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "target", "release"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	engine := filepath.Join(root, "target", "release", rustEngineName)
+	if err := os.WriteFile(engine, []byte("stub engine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config.json"), []byte(`{"server":{"port":8080}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return engine
+}
+
+func TestResolveRootAcceptsRustGatewayRoot(t *testing.T) {
+	root := t.TempDir()
+	writeRustGateway(t, root)
+
+	got, err := resolveRoot(filepath.Join(root, "target", "release"), "")
+	if err != nil {
+		t.Fatalf("resolveRoot returned error for a Rust root: %v", err)
+	}
+	if got != absClean(t, root) {
+		t.Fatalf("resolveRoot = %q, want %q", got, absClean(t, root))
+	}
+}
+
+func TestResolveRootRejectsConfigWithoutEngine(t *testing.T) {
+	root := t.TempDir()
+	// config.json alone is not a gateway root: nothing could be launched from it.
+	if err := os.WriteFile(filepath.Join(root, "config.json"), []byte(`{"server":{"port":8080}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveRoot(root, root); err == nil {
+		t.Skip("an ancestor unexpectedly contains a gateway root")
+	}
+}
+
+func TestResolveEnginePrefersRustGatewayInRoot(t *testing.T) {
+	root := t.TempDir()
+	engine := writeRustGateway(t, root)
+	cfgPath := filepath.Join(root, "config.json")
+
+	spec := resolveEngine(root, "", cfgPath, "", false)
+	if !spec.rust || !spec.found {
+		t.Fatalf("spec = %+v, want a found Rust engine", spec)
+	}
+	if filepath.Clean(spec.path) != filepath.Clean(engine) {
+		t.Fatalf("engine path = %q, want %q", spec.path, engine)
+	}
+	if len(spec.args) != 2 || spec.args[0] != "--config" || spec.args[1] != cfgPath {
+		t.Fatalf("engine args = %v, want [--config %s]", spec.args, cfgPath)
+	}
+}
+
+func TestResolveEngineEnvOverrideWins(t *testing.T) {
+	root := t.TempDir()
+	writeRustGateway(t, root) // present, but ACCIO_BRIDGE_ENGINE must take priority
+
+	other := filepath.Join(t.TempDir(), rustEngineName)
+	if err := os.WriteFile(other, []byte("stub engine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := resolveEngine(root, other, filepath.Join(root, "config.json"), "", false)
+	if !spec.rust || filepath.Clean(spec.path) != absClean(t, other) {
+		t.Fatalf("spec = %+v, want the env engine %q", spec, other)
+	}
+}
+
+func TestResolveEngineFallsBackToNode(t *testing.T) {
+	root := t.TempDir()
+	writeServerScript(t, root) // a Node root: no Rust engine anywhere
+	cfgPath := filepath.Join(root, "config.json")
+
+	spec := resolveEngine(root, "", cfgPath, `C:\node\node.exe`, true)
+	if spec.rust || !spec.found {
+		t.Fatalf("spec = %+v, want a found Node engine", spec)
+	}
+	if spec.path != `C:\node\node.exe` {
+		t.Fatalf("engine path = %q", spec.path)
+	}
+	if len(spec.args) != 1 || spec.args[0] != filepath.Join("src", "server.js") {
+		t.Fatalf("engine args = %v, want the Node script", spec.args)
+	}
+}
+
+func TestResolveEngineEnvEngineWithoutRootEngine(t *testing.T) {
+	// A Rust root that has not been built yet: the env engine still has to resolve.
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "config.json"), []byte(`{"server":{"port":8080}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	engine := filepath.Join(t.TempDir(), rustEngineName)
+	if err := os.WriteFile(engine, []byte("stub engine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := resolveEngine(root, engine, filepath.Join(root, "config.json"), "", false)
+	if !spec.rust || !spec.found {
+		t.Fatalf("spec = %+v, want the env Rust engine", spec)
+	}
+}

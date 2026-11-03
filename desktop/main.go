@@ -107,7 +107,8 @@ func runApp() int {
 	nodePath, nodeFound := resolveNode(os.Getenv("ACCIO_NODE"))
 	port, configPath := resolveGatewayPort(root, os.Getenv("ACCIO_BRIDGE_CONFIG"))
 
-	gw := NewGatewayManager(root, nodePath, nodeFound, port)
+	engine := resolveEngine(root, os.Getenv("ACCIO_BRIDGE_ENGINE"), configPath, nodePath, nodeFound)
+	gw := NewGatewayManager(root, nodePath, nodeFound, port, engine)
 	gw.Sync()
 	// Like Magpie, serving starts with the app. Opt out with ACCIO_DESKTOP_NO_AUTOSTART=1.
 	if os.Getenv("ACCIO_DESKTOP_NO_AUTOSTART") != "1" && gw.Status().State == stateStopped {
@@ -205,6 +206,8 @@ type selfTestResult struct {
 	GatewayState  string   `json:"gatewayState"`
 	TokenEnforced bool     `json:"tokenEnforced"`
 	UiServed      bool     `json:"uiServed"`
+	Engine        string   `json:"engine"`
+	EngineRust    bool     `json:"engineRust"`
 	Errors        []string `json:"errors"`
 }
 
@@ -245,7 +248,10 @@ func runSelfTest(outPath string, startGateway bool) int {
 	port, configPath := resolveGatewayPort(root, os.Getenv("ACCIO_BRIDGE_CONFIG"))
 	res.Port = port
 
-	gw := NewGatewayManager(root, nodePath, nodeFound, port)
+	engine := resolveEngine(root, os.Getenv("ACCIO_BRIDGE_ENGINE"), configPath, nodePath, nodeFound)
+	gw := NewGatewayManager(root, nodePath, nodeFound, port, engine)
+	res.Engine = gw.EnginePath()
+	res.EngineRust = gw.EngineIsRust()
 	gw.Sync()
 	if startGateway {
 		if err := gw.Start(); err != nil {
