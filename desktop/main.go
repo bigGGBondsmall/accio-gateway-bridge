@@ -102,6 +102,8 @@ func runApp() int {
 	exeDir := executableDir()
 	root, err := resolveRoot(exeDir, os.Getenv("ACCIO_BRIDGE_ROOT"))
 	if err != nil {
+		showMessageBox("Accio Bridge 无法启动",
+			err.Error()+"\n\n需要把 config.json 与 accio-gateway-bridge-rust.exe 放在 accio-desktop.exe 同一个目录里，或用环境变量 ACCIO_BRIDGE_ROOT 指向该目录。")
 		return 1
 	}
 	nodePath, nodeFound := resolveNode(os.Getenv("ACCIO_NODE"))
@@ -159,6 +161,8 @@ func runApp() int {
 		},
 	})
 	if wv == nil {
+		showMessageBox("Accio Bridge 无法启动",
+			"无法创建 WebView2 窗口。请先安装 Microsoft Edge WebView2 Runtime（Windows 10 可能没有预装），安装后重试：\nhttps://developer.microsoft.com/microsoft-edge/webview2/")
 		return 1
 	}
 	app.webview = wv

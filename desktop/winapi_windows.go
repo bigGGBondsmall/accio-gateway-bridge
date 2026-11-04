@@ -42,6 +42,7 @@ var (
 	procSetProcessDPIAware            = user32.NewProc("SetProcessDPIAware")
 	procGetDpiForSystem               = user32.NewProc("GetDpiForSystem")
 	procGetSystemMetrics              = user32.NewProc("GetSystemMetrics")
+	procMessageBoxW                   = user32.NewProc("MessageBoxW")
 
 	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
 
@@ -371,4 +372,27 @@ func destroyIcon(hicon uintptr) {
 	if hicon != 0 {
 		_, _, _ = procDestroyIcon.Call(hicon)
 	}
+}
+
+// showMessageBox reports a startup failure to the user. The shell is linked with
+// -H windowsgui, so nothing reaches stderr: without this, launching it from a
+// folder that is not a gateway root looks like "double-click does nothing".
+func showMessageBox(title, text string) {
+	const (
+		mbIconError = 0x00000010
+		mbSetFg     = 0x00010000
+		mbTopmost   = 0x00040000
+	)
+	titlePtr, err := windows.UTF16PtrFromString(title)
+	if err != nil {
+		return
+	}
+	textPtr, err := windows.UTF16PtrFromString(text)
+	if err != nil {
+		return
+	}
+	_, _, _ = procMessageBoxW.Call(0,
+		uintptr(unsafe.Pointer(textPtr)),
+		uintptr(unsafe.Pointer(titlePtr)),
+		mbIconError|mbSetFg|mbTopmost)
 }
